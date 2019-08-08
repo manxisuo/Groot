@@ -19,8 +19,8 @@ RULE_DICT = {} # 用户注册的各级页面处理逻辑
 OLD_URLS = set()
 
 
-def identify(arg):
-    return arg
+def identify(sth, *args, **kwargs):
+    return sth
 
 
 def info(msg):
@@ -33,23 +33,28 @@ class PageTask:
         self.level = level
         self.url = url
 
+    def tid(self):
+        return self.url
+
     def run(self):
         info('Get {0}'.format(urllib.parse.unquote(self.url)))
         html = str(session.get(self.url).content, 'utf-8')
         rules = RULE_DICT[self.level]()
 
-        for extractor, action in rules.items():
+        for extractor, actions in rules.items():
+            # 抽取结果
             if callable(extractor):  # 自定义extractor函数
                 results = extractor(html)
             else:
                 results = extractor.extract(html)
 
+            # 执行动作(列表)
             for i, result in enumerate(results):
-                if callable(action):  # 自定义action函数
-                    val, context = result
-                    action(val, context)
-                else:
-                    action.act(result, i + 1)
+                val, context = result
+                if not hasattr(actions, '__iter__'):  # 单个action时，可以不放到列表中
+                    actions = [actions]
+                for action in actions:
+                    action.act(val, context, i + 1)
 
 
 # 文件下载任务
@@ -60,6 +65,9 @@ class DownloadTask:
         self.n = n
         self.savedir = savedir
         self.filename = filename
+
+    def tid(self):
+        return self.url
 
     def run(self):
         info('Download {0}'.format(urllib.parse.unquote(self.url)))
@@ -77,7 +85,7 @@ class DownloadTask:
 
 # 元素的文本抽取器
 class Text:
-    def __init__(self, selector, fn=identify):
+    def __init__(self, selector: str, fn=identify):
         self.selector = selector
         self.fn = fn
 
@@ -92,7 +100,7 @@ class Text:
 
 # 元素的属性抽取器
 class Attr:
-    def __init__(self, selector, name, fn=identify):
+    def __init__(self, selector: str, name, fn=identify):
         self.selector = selector
         self.name = name
         self.fn = fn
@@ -118,16 +126,29 @@ class Re:
             yield (val, context)
 
 
+# 动作：用户自定义
+class Func:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def act(self, val, context, n):
+        self.fn(val, context)  # TODO 怎样更灵活地传参数
+
+
 # 动作：下载
 class Download:
     def __init__(self, savedir, filename, fn=identify):
+        """
+        :param savedir: 文件保存目录
+        :param filename: 文件名
+        :param fn: (val, context) -> url 将提取的结果进行处理，得到下载URL
+        """
         self.savedir = savedir
         self.filename = filename
         self.fn = fn
 
-    def act(self, result, n):
-        val, context = result
-        url = self.fn(val)
+    def act(self, val, context, n):
+        url = self.fn(val, context)  # TODO 函数的定位，以及参数
         task = DownloadTask(url, context, n, self.savedir, self.filename)
         q.put(task)
 
@@ -138,16 +159,13 @@ def _download(url, savedir, filename):
     urllib.request.urlretrieve(url, os.path.join(savedir, filename))
 
 
-def format_context(format_str: str, context) -> str:
-    if not format_str or not context:
-        return format_str
-
-    if type(context) is tuple:
-        return format_str.format(*context)
-    elif type(context) is dict:
-        return format_str.format(**context)
-    else:
-        return format_str
+def _format_context(format_str: str, context) -> str:
+    if format_str and context:
+        if type(context) is tuple:
+            return format_str.format(*context)
+        elif type(context) is dict:
+            return format_str.format(**context)
+    return format_str
 
 
 # 动作：URL入队列
@@ -157,12 +175,11 @@ class Enqueue:
         self.level = level
         self.custom = custom
 
-    def act(self, result, n):
-        val, context = result
+    def act(self, val, context, n):
         if callable(self.custom):
-            url = self.custom(val, context)
+            url = self.custom(val, context)  # TODO 函数的定位，以及参数
         elif type(self.custom) is str:
-            url = format_context(self.custom, context)
+            url = _format_context(self.custom, context)
         else:
             url = val
         q.put(PageTask(self.level, url))
@@ -186,8 +203,9 @@ def page(level):
 def thread_func():
     while True:
         item = q.get()
-        if item.url in OLD_URLS: continue # TODO 多线程同步问题
-        OLD_URLS.add(item.url)
+        if item.tid() in OLD_URLS:
+            continue  # TODO 多线程同步问题
+        OLD_URLS.add(item.tid())
         item.run()
         q.task_done()
 
@@ -196,11 +214,10 @@ def thread_func():
 def start(thread_num=3):
     for i in range(thread_num):
         t = threading.Thread(target=thread_func)
-        # t.daemon = True # TODO
+        t.daemon = True  # TODO
         t.start()
+    q.join()
 
 
 if __name__ == "__main__":
     pass
-    t = Text('h1')
-    r = t.extract(None, '')
