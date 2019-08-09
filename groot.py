@@ -15,8 +15,8 @@ session.headers['User-Agent'] = \
     'applewebkit/537.36 (khtml, like gecko) ' \
     'chrome/70.0.3538.102 safari/537.36'
 
-q = Queue() # URL队列
-RULE_DICT = {} # 用户注册的各级页面处理逻辑
+q = Queue()  # URL队列
+RULE_DICT = {}  # 用户注册的各级页面处理逻辑
 OLD_URLS = set()
 
 
@@ -34,6 +34,21 @@ def _iterable(sth):
 
 # 从页面抽取的数据结果
 Result = namedtuple('Result', ['val', 'context'])
+
+
+class Context:
+    def __init__(self, *args, **kwargs):
+        self.args = [*args]
+        self.kwargs = kwargs
+
+    def add_arg(self, arg):
+        self.args.append(arg)
+
+    def add_kwarg(self, key, value):
+        self.kwargs[key] = value
+
+    def format(self, format_str):
+        return format_str.format(*self.args, **self.kwargs)
 
 
 # 页面处理任务
@@ -64,7 +79,7 @@ class PageTask:
 
 # 文件下载任务
 class DownloadTask:
-    def __init__(self, url, save_dir, filename):  # TODO
+    def __init__(self, url, save_dir, filename):
         self.url = url
         self.save_dir = save_dir
         self.filename = filename
@@ -83,13 +98,12 @@ class Text:
         self.selector = selector
         self.fn = fn
 
-    def extract(self, html) -> str:
+    def extract(self, html):
         soup = BeautifulSoup(html, 'lxml', from_encoding='utf-8')
         elements = soup.select(self.selector)
         for el in elements:
             val = self.fn(el.text)
-            context = el.attrs
-            yield Result(val, context)
+            yield Result(val, Context(**el.attrs))
 
 
 # 元素的属性抽取器
@@ -99,13 +113,12 @@ class Attr:
         self.name = name
         self.fn = fn
 
-    def extract(self, html) -> str:
+    def extract(self, html):
         soup = BeautifulSoup(html, 'lxml', from_encoding='utf-8')
         elements = soup.select(self.selector)
         for el in elements:
             val = self.fn(el.attrs[self.name])
-            context = el.attrs
-            yield Result(val, context)
+            yield Result(val, Context(**el.attrs))
 
 
 # 正则表达式抽取器
@@ -113,11 +126,10 @@ class Re:
     def __init__(self, re_str):
         self.regexp = re.compile(re_str)
 
-    def extract(self, html) -> str:
+    def extract(self, html):
         for m in self.regexp.finditer(html):
             val = m.group()
-            context = (val, *m.groups())
-            yield Result(val, context)
+            yield Result(val, Context(val, *m.groups()))
 
 
 # 用户自定义抽取器或动作
@@ -126,9 +138,9 @@ class Func:
         self.fn = fn
 
     def act(self, result: Result, n):
-        self.fn(result)  # TODO 怎样更灵活地传参数
+        self.fn(result)
 
-    def extract(self, html) -> str:
+    def extract(self, html) -> list:
         return self.fn(html)
 
 
@@ -144,15 +156,14 @@ class Download:
         url = self.fn(result) if callable(self.fn) else result.val
 
         # 用于格式化保存路径和文件名的上下文
-        context = {
-            **context,
+        context = Context(*context.args, **context.kwargs, **{
             'basename': os.path.basename(url),
             'ext': os.path.splitext(url)[1],
             'n': n
-        }
+        })
 
-        save_dir = self.save_dir.format(**context)
-        filename = self.filename.format(**context)
+        save_dir = context.format(self.save_dir)
+        filename = context.format(self.filename)
 
         task = DownloadTask(url, save_dir, filename)
         q.put(task)
@@ -164,18 +175,9 @@ def _download(url, save_dir, filename):
     urllib.request.urlretrieve(url, os.path.join(save_dir, filename))
 
 
-def _format_context(format_str: str, context) -> str:
-    if format_str and context:
-        if type(context) is tuple:
-            return format_str.format(*context)
-        elif type(context) is dict:
-            return format_str.format(**context)
-    return format_str
-
-
 def _get_format_fn(format_str: str):
     def fn(result: Result):
-        return _format_context(format_str, result.context)
+        return result.context.format(format_str)
     return fn
 
 
