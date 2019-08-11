@@ -3,29 +3,39 @@ from bs4 import BeautifulSoup
 from queue import Queue
 import urllib.request
 import urllib.parse
+import time
 import re
+import sys
 import os
 import os.path
 import threading
 from collections import namedtuple
 
+
 session = requests.Session()
-session.headers['User-Agent'] = \
-    'mozilla/5.0 (x11; linux x86_64) ' \
-    'applewebkit/537.36 (khtml, like gecko) ' \
-    'chrome/70.0.3538.102 safari/537.36'
+session.headers['User-Agent'] = (
+    'mozilla/5.0 (x11; linux x86_64) '
+    'applewebkit/537.36 (khtml, like gecko) '
+    'chrome/70.0.3538.102 safari/537.36')
+
 
 q = Queue()  # URL队列
 RULE_DICT = {}  # 用户注册的各级页面处理逻辑
-OLD_URLS = set()
+OLD_TASKS = set() # 已处理任务的标识列表
+CONFIG = {
+    'thread_num': 1,
+    'interval': 1,  # 同一线程两次HTTP请求的间隔秒数
+}
 
 
 def identify(sth, *args, **kwargs):
     return sth
 
 
-def info(msg):
-    print('[INFO] {0}'.format(msg))
+# 打印INFO日志
+def _info(msg):
+    t = time.strftime('%Y-%m-%d %H:%M:%S')
+    print('[INFO][{0}] {1}'.format(t, msg))
 
 
 def _iterable(sth):
@@ -41,40 +51,55 @@ class Context:
         self.args = [*args]
         self.kwargs = kwargs
 
-    def add_arg(self, arg):
-        self.args.append(arg)
-
-    def add_kwarg(self, key, value):
-        self.kwargs[key] = value
-
     def format(self, format_str):
         return format_str.format(*self.args, **self.kwargs)
+
+    def _c(self, _type):
+        if _type is int:
+            return self.args
+        elif _type is str:
+            return self.kwargs
+        else:
+            raise Exception('error key type')
+
+    def __getitem__(self, item):
+        return self._c(type(item))[item]
+
+    def __setitem__(self, key, value):
+        self._c(type(key))[key] = value
 
 
 # 页面处理任务
 class PageTask:
-    def __init__(self, level, url):
+    def __init__(self, level, url, last_page_data={}):
         self.level = level
         self.url = url
+        self.last_page_data = last_page_data  # 上一个页面的页面数据
 
     def tid(self):
         return self.url
 
     def run(self):
-        info('Get {0}'.format(urllib.parse.unquote(self.url)))
+        _info('Get {0}'.format(urllib.parse.unquote(self.url)))
         html = str(session.get(self.url).content, 'utf-8')
-        rules = RULE_DICT[self.level]()
+        rules = RULE_DICT[self.level]
 
         for extractor, actions in rules.items():
             # 抽取结果
             results = extractor.extract(html)
+            page_data = {}  # 当前页面的页面数据
 
             # 执行动作(列表)
             for i, result in enumerate(results):
+
+                # 将上一个页面的页面数据保存到context中，给当前页面的action使用
+                for name in self.last_page_data:
+                    result.context[name] = self.last_page_data[name]
+
                 if not _iterable(actions):  # 单个action时，可以不放到列表中
                     actions = [actions]
                 for action in actions:
-                    action.act(result, i + 1)
+                    action.act(result, page_data, i + 1)
 
 
 # 文件下载任务
@@ -88,37 +113,42 @@ class DownloadTask:
         return self.url
 
     def run(self):
-        info('Download {0}'.format(urllib.parse.unquote(self.url)))
+        _info('Download {0}'.format(urllib.parse.unquote(self.url)))
         _download(self.url, self.save_dir, self.filename)
 
 
-# 元素的文本抽取器
-class Text:
-    def __init__(self, selector: str, fn=identify):
+# CSS选择器
+class Selector:
+    def __init__(self, selector: str, max_count=sys.maxsize):
         self.selector = selector
-        self.fn = fn
+        self.max_count = max_count
 
-    def extract(self, html):
-        soup = BeautifulSoup(html, 'lxml', from_encoding='utf-8')
-        elements = soup.select(self.selector)
-        for el in elements:
-            val = self.fn(el.text)
-            yield Result(val, Context(**el.attrs))
+    def select(self, soup: BeautifulSoup):
+        elements = soup.select(self.selector)[: self.max_count]
+        return elements
 
 
-# 元素的属性抽取器
-class Attr:
-    def __init__(self, selector: str, name, fn=identify):
-        self.selector = selector
+# 元素属性提取器
+class Element:
+    def __init__(self, selector: str, name=None, fn=identify):
+        self.selector = Selector(selector) if type(selector) is str else selector
         self.name = name
         self.fn = fn
 
     def extract(self, html):
         soup = BeautifulSoup(html, 'lxml', from_encoding='utf-8')
-        elements = soup.select(self.selector)
+        elements = self.selector.select(soup)
         for el in elements:
-            val = self.fn(el.attrs[self.name])
-            yield Result(val, Context(**el.attrs))
+            context = Context(**el.attrs)
+            context['#text'] = el.text  # 特殊属性：'#text
+
+            val = self.fn(context.kwargs[self.name]) if self.name else ''  # fn的参数
+            yield Result(val, context)
+
+
+# 元素的文本抽取器
+def Text(selector: str):
+    return Element(selector, '#text')
 
 
 # 正则表达式抽取器
@@ -137,10 +167,10 @@ class Func:
     def __init__(self, fn):
         self.fn = fn
 
-    def act(self, result: Result, n):
+    def act(self, result: Result, page_data: dict, index):
         self.fn(result)
 
-    def extract(self, html) -> list:
+    def extract(self, html):
         return self.fn(html)
 
 
@@ -151,7 +181,7 @@ class Download:
         self.filename = filename
         self.fn = _get_format_fn(custom) if type(custom) is str else custom
 
-    def act(self, result: Result, n):
+    def act(self, result: Result, page_data: dict, index):
         val, context = result
         url = self.fn(result) if callable(self.fn) else result.val
 
@@ -159,7 +189,7 @@ class Download:
         context = Context(*context.args, **context.kwargs, **{
             'basename': os.path.basename(url),
             'ext': os.path.splitext(url)[1],
-            'n': n
+            'index': index
         })
 
         save_dir = context.format(self.save_dir)
@@ -181,51 +211,80 @@ def _get_format_fn(format_str: str):
     return fn
 
 
+# 动作：设置页面数据
+# :custom 函数或格式化字符串
+class SetPageData:
+    def __init__(self, data_name, custom):
+        self.data_name = data_name
+        self.fn = _get_format_fn(custom) if type(custom) is str else custom
+
+    def act(self, result: Result, page_data: dict, index):
+        page_data[self.data_name] = self.fn(result)
+
+
 # 动作：URL入队列
-# :custom 函数或字符串(支持{0}, {1}等格式)
+# :custom 函数或格式化字符串
 class Enqueue:
     def __init__(self, level, custom=None):
         self.level = level
         self.fn = _get_format_fn(custom) if type(custom) is str else custom
 
-    def act(self, result: Result, n):
+    def act(self, result: Result, page_data: dict, index):
         url = self.fn(result) if callable(self.fn) else result.val
-        q.put(PageTask(self.level, url))
+        q.put(PageTask(self.level, url, page_data))
+
+
+def login(login_url, params):
+    _info('Login: {0}'.format(login_url))
+    r = session.post(login_url, data=params)
 
 
 # 注册初始URL
-def urls(func):
+# @Deprecated
+def register_urls(func):
     for url in func():
         q.put(PageTask(1, url))
     return func
 
 
+def initial_urls(urls):
+    for url in urls:
+        q.put(PageTask(1, url))
+
+
 # 注册不同级别的页面处理逻辑
-def page(level):
+# @Deprecated
+def register_page(level):
     def decorator(func):
-        RULE_DICT[level] = func
+        RULE_DICT[level] = func()
         return func
     return decorator
 
 
-def thread_func():
+def page_rules(level, rules):
+    RULE_DICT[level] = rules
+
+
+def _thread_func():
     while True:
         item = q.get()
-        if item.tid() in OLD_URLS:
+        if item.tid() in OLD_TASKS:
             continue  # TODO 多线程同步问题
-        OLD_URLS.add(item.tid())
+        OLD_TASKS.add(item.tid())
         item.run()
         q.task_done()
+        time.sleep(CONFIG['interval'])
 
 
 # 启动爬虫
-def start(thread_num=3):
-    for i in range(thread_num):
-        t = threading.Thread(target=thread_func)
+def start():
+    for i in range(CONFIG['thread_num']):
+        t = threading.Thread(target=_thread_func)
         t.daemon = True  # TODO
         t.start()
     q.join()
 
 
 if __name__ == "__main__":
-    pass
+    c = Context(1, 2, 3, name="Tom")
+
