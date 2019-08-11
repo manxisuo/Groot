@@ -15,34 +15,39 @@ _session = requests.Session()
 _session.headers['User-Agent'] = (
     'mozilla/5.0 (x11; linux x86_64) '
     'applewebkit/537.36 (khtml, like gecko) '
-    'chrome/70.0.3538.102 safari/537.36')
+    'chrome/70.0.3538.102 '
+    'safari/537.36')
 
 _config = {
     'thread_num': 2,
     'interval': 1,  # 同一线程两次HTTP请求的间隔秒数
-    'status_log_interval': 5,
+    'status_log_interval': 3,
 }
 
-_queue = Queue()  # URL队列 TODO maxsize
 _rule_dict = {}  # 用户注册的各级页面处理逻辑
+_queue = Queue()  # URL队列 TODO maxsize
 _done_tasks = set()  # 已处理任务的标识列表
-_q_status = {}
+_queue_status = {}
 _done_status = {}
+
+
+# 如果key不存在，则加入到字典，并赋予初值；否则，什么都不做
+def _ensue_key(dict_, key, initial_value):
+    if key not in dict_:
+        dict_[key] = initial_value
 
 
 def _put_task(task):
     task_flag = type(task).__name__
-    if task_flag not in _q_status:
-        _q_status[task_flag] = 0
-    _q_status[task_flag] += 1
+    _ensue_key(_queue_status, task_flag, 0)
+    _queue_status[task_flag] += 1
 
     _queue.put(task)
 
 
 def _get_task():
     task = _queue.get()
-    task_flag = type(task).__name__
-    _q_status[task_flag] -= 1
+    _queue_status[type(task).__name__] -= 1
 
     return task
 
@@ -153,7 +158,7 @@ class Func:
 class Enqueue:
     def __init__(self, level, custom=None):
         self.level = level
-        self.fn = _get_result_format_fn(custom) if type(custom) is str else custom
+        self.fn = _result_format_fn(custom) if type(custom) is str else custom
 
     def act(self, result: Result, page_data: dict):
         url = self.fn(result) if callable(self.fn) else result.val
@@ -164,9 +169,9 @@ class Enqueue:
 # 动作：下载
 class Download:
     def __init__(self, save_dir, filename, custom=None):
-        self.save_dir = _get_context_format_fn(save_dir) if type(save_dir) is str else save_dir
-        self.filename = _get_context_format_fn(filename) if type(filename) is str else filename
-        self.fn = _get_result_format_fn(custom) if type(custom) is str else custom
+        self.save_dir = _context_format_fn(save_dir) if type(save_dir) is str else save_dir
+        self.filename = _context_format_fn(filename) if type(filename) is str else filename
+        self.fn = _result_format_fn(custom) if type(custom) is str else custom
 
     def act(self, result: Result, page_data: dict):
         val, context = result
@@ -182,48 +187,42 @@ class Download:
         _put_task(task)
 
 
-# 动作：设置对同一Result的动作间数据
+PageScope = 1
+ActionScope = 2
+
+
+# 动作：在某个作用范围内设置一个数据项
 # :custom 函数或格式化字符串
-class SetActionData:
-    def __init__(self, data_name, custom):
+class SetData:
+    def __init__(self, scope, data_name, custom, keep=False):
+        self.scope = scope
         self.data_name = data_name
-        self.fn = _get_result_format_fn(custom) if type(custom) is str else custom
+        self.fn = _result_format_fn(custom) if type(custom) is str else custom
+        self.keep = keep
 
     def act(self, result: Result, page_data: dict):
-        result.context['#inner'][self.data_name] = self.fn(result)
+        if self.scope == PageScope:
+            key_flag = '#outer' if self.keep else '#inner'
+            page_data[key_flag][self.data_name] = self.fn(result)
+        elif self.scope == ActionScope:
+            data_value = self.fn(result)
+            result.context[self.data_name] = data_value
+            if self.keep:
+                result.context['#outer'][self.data_name] = data_value
 
 
-class KeepActionData:
-    def __init__(self, data_name, custom=None):
+# 将一个在当前上下文能取到的变量，保存在指定的作用范围内，并保持到下一级别的页面
+class KeepData:
+    def __init__(self, scope, data_name):
+        self.scope = scope
         self.data_name = data_name
 
-        if custom:
-            self.fn = _get_result_format_fn(custom) if type(custom) is str else custom
-        else:
-            self.fn = lambda r: r.context[data_name]
-
     def act(self, result: Result, page_data: dict):
-        result.context['#outer'][self.data_name] = self.fn(result)
-
-
-# 动作：设置页面数据
-# :custom 函数或格式化字符串
-class SetPageData:
-    def __init__(self, data_name, custom):
-        self.data_name = data_name
-        self.fn = _get_result_format_fn(custom) if type(custom) is str else custom
-
-    def act(self, result: Result, page_data: dict):
-        page_data['#inner'][self.data_name] = self.fn(result)
-
-
-class KeepPageData:
-    def __init__(self, data_name, custom):
-        self.data_name = data_name
-        self.fn = _get_result_format_fn(custom) if type(custom) is str else custom
-
-    def act(self, result: Result, page_data: dict):
-        page_data['#outer'][self.data_name] = self.fn(result)
+        data_val = result.context[self.data_name]
+        if self.scope == PageScope:
+            page_data['#outer'][self.data_name] = data_val
+        elif self.scope == ActionScope:
+            result.context['#outer'][self.data_name] = data_val
 
 
 # 页面处理任务
@@ -327,16 +326,12 @@ def _download(url, save_dir, filename):
         urllib.request.urlretrieve(url, file_path)
 
 
-def _get_result_format_fn(format_str: str):
-    def fn(result: Result):
-        return result.context.format(format_str)
-    return fn
+def _result_format_fn(format_str: str):
+    return lambda result: result.context.format(format_str)
 
 
-def _get_context_format_fn(format_str: str):
-    def fn(ctx: Context):
-        return ctx.format(format_str)
-    return fn
+def _context_format_fn(format_str: str):
+    return lambda ctx: ctx.format(format_str)
 
 
 def _work_func():
@@ -348,8 +343,7 @@ def _work_func():
         task.run()
 
         task_flag = type(task).__name__
-        if task_flag not in _done_status:
-            _done_status[task_flag] = 0
+        _ensue_key(_done_status, task_flag, 0)
         _done_status[task_flag] += 1
 
         _queue.task_done()
@@ -359,7 +353,7 @@ def _work_func():
 def _monitor_func():
     while True:
         time.sleep(_config['status_log_interval'])
-        _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(len(_done_tasks), _done_status, _queue.qsize(), _q_status))
+        _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(len(_done_tasks), _done_status, _queue.qsize(), _queue_status))
 
 
 if __name__ == "__main__":
