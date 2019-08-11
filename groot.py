@@ -10,6 +10,7 @@ import os
 import os.path
 import threading
 from collections import namedtuple
+from enum import Enum
 
 _session = requests.Session()
 _session.headers['User-Agent'] = (
@@ -110,24 +111,15 @@ class Selector:
 
 # 元素属性提取器
 class Element:
-    def __init__(self, selector, name=None, fn=_identify):
+    def __init__(self, selector):
         self.selector = Selector(selector) if type(selector) is str else selector
-        self.name = name
-        self.fn = fn
 
     def extract(self, resp_str):
         elements = self.selector.select(resp_str)
         for el in elements:
             context = Context(**el.attrs)
             context['#text'] = el.text  # 特殊属性：'#text
-
-            val = self.fn(context[self.name]) if self.name else ''  # fn的参数
-            yield Result(val, context)
-
-
-# 元素的文本抽取器
-def Text(selector):
-    return Element(selector, '#text')
+            yield Result(None, context)  # TODO
 
 
 # 正则表达式抽取器
@@ -138,7 +130,10 @@ class Re:
     def extract(self, resp_str):
         for m in self.regexp.finditer(resp_str):
             val = m.group()
-            yield Result(val, Context(val, *m.groups()))
+            kwargs = {'#'+str(k+1): v for k, v in enumerate(m.groups())}
+            kwargs['#0'] = m.group()
+            ctx = Context(**kwargs)
+            yield Result(None, ctx)  # TODO
 
 
 # 用户自定义抽取器或动作
@@ -156,39 +151,40 @@ class Func:
 # 动作：URL入队列
 # :custom 函数或格式化字符串
 class Enqueue:
-    def __init__(self, level, custom=None):
+    def __init__(self, level, custom):
         self.level = level
         self.fn = _result_format_fn(custom) if type(custom) is str else custom
 
     def act(self, result: Result, page_data: dict):
-        url = self.fn(result) if callable(self.fn) else result.val
+        url = self.fn(result)
         last_page_data = {**page_data['#outer'], **result.context['#outer']}
         _put_task(PageTask(self.level, url, last_page_data))
 
 
 # 动作：下载
 class Download:
-    def __init__(self, save_dir, filename, custom=None):
+    def __init__(self, url, save_dir, filename):
         self.save_dir = _context_format_fn(save_dir) if type(save_dir) is str else save_dir
         self.filename = _context_format_fn(filename) if type(filename) is str else filename
-        self.fn = _result_format_fn(custom) if type(custom) is str else custom
+        self.url = _result_format_fn(url) if type(url) is str else url
 
     def act(self, result: Result, page_data: dict):
-        val, context = result
-        url = self.fn(result) if callable(self.fn) else val
+        context = result.context
+        url = self.url(result)
 
         # 用于格式化保存路径和文件名的上下文
-        context = Context(*context.args, **context.kwargs, **{
+        ctx = Context(*context.args, **context.kwargs, **{
             '#basename': os.path.basename(url),
             '#ext': os.path.splitext(url)[1]
         })
 
-        task = DownloadTask(url, self.save_dir(context), self.filename(context))
+        task = DownloadTask(url, self.save_dir(ctx), self.filename(ctx))
         _put_task(task)
 
 
-PageScope = 1
-ActionScope = 2
+class Scope(Enum):
+    PAGE = 1
+    ACTIONS = 2
 
 
 # 动作：在某个作用范围内设置一个数据项
@@ -201,10 +197,10 @@ class SetData:
         self.keep = keep
 
     def act(self, result: Result, page_data: dict):
-        if self.scope == PageScope:
+        if self.scope == Scope.PAGE:
             key_flag = '#outer' if self.keep else '#inner'
             page_data[key_flag][self.data_name] = self.fn(result)
-        elif self.scope == ActionScope:
+        elif self.scope == Scope.ACTIONS:
             data_value = self.fn(result)
             result.context[self.data_name] = data_value
             if self.keep:
@@ -219,9 +215,9 @@ class KeepData:
 
     def act(self, result: Result, page_data: dict):
         data_val = result.context[self.data_name]
-        if self.scope == PageScope:
+        if self.scope == Scope.PAGE:
             page_data['#outer'][self.data_name] = data_val
-        elif self.scope == ActionScope:
+        elif self.scope == Scope.ACTIONS:
             result.context['#outer'][self.data_name] = data_val
 
 
