@@ -23,7 +23,7 @@ q = Queue()  # URL队列
 RULE_DICT = {}  # 用户注册的各级页面处理逻辑
 OLD_TASKS = set() # 已处理任务的标识列表
 CONFIG = {
-    'thread_num': 1,
+    'thread_num': 2,
     'interval': 1,  # 同一线程两次HTTP请求的间隔秒数
 }
 
@@ -68,13 +68,16 @@ class Context:
     def __setitem__(self, key, value):
         self._c(type(key))[key] = value
 
+    def append(self, item):
+        return self.args.append(item)
+
 
 # 页面处理任务
 class PageTask:
-    def __init__(self, level, url, last_page_data={}):
+    def __init__(self, level, url, last_page_data=None):
         self.level = level
         self.url = url
-        self.last_page_data = last_page_data  # 上一个页面的页面数据
+        self.last_page_data = last_page_data or {}  # 上一个页面的页面数据
 
     def tid(self):
         return self.url
@@ -87,19 +90,22 @@ class PageTask:
         for extractor, actions in rules.items():
             # 抽取结果
             results = extractor.extract(html)
-            page_data = {}  # 当前页面的页面数据
 
             # 执行动作(列表)
-            for i, result in enumerate(results):
+            for index, result in enumerate(results):
+                # 当前元素在抽取的元素列表中的索引
+                result.context['#index'] = index
 
-                # 将上一个页面的页面数据保存到context中，给当前页面的action使用
+                action_data = {}  # 当前动作序列的共享数据
+
+                # 将上一个页面的页面数据保存到context中，给当前页面的action使用 TODO
                 for name in self.last_page_data:
                     result.context[name] = self.last_page_data[name]
 
                 if not _iterable(actions):  # 单个action时，可以不放到列表中
                     actions = [actions]
                 for action in actions:
-                    action.act(result, page_data, i + 1)
+                    action.act(result, action_data)
 
 
 # 文件下载任务
@@ -142,7 +148,7 @@ class Element:
             context = Context(**el.attrs)
             context['#text'] = el.text  # 特殊属性：'#text
 
-            val = self.fn(context.kwargs[self.name]) if self.name else ''  # fn的参数
+            val = self.fn(context[self.name]) if self.name else ''  # fn的参数
             yield Result(val, context)
 
 
@@ -167,7 +173,7 @@ class Func:
     def __init__(self, fn):
         self.fn = fn
 
-    def act(self, result: Result, page_data: dict, index):
+    def act(self, result: Result, page_data: dict):
         self.fn(result)
 
     def extract(self, html):
@@ -181,15 +187,14 @@ class Download:
         self.filename = filename
         self.fn = _get_format_fn(custom) if type(custom) is str else custom
 
-    def act(self, result: Result, page_data: dict, index):
+    def act(self, result: Result, page_data: dict):
         val, context = result
         url = self.fn(result) if callable(self.fn) else result.val
 
         # 用于格式化保存路径和文件名的上下文
         context = Context(*context.args, **context.kwargs, **{
             'basename': os.path.basename(url),
-            'ext': os.path.splitext(url)[1],
-            'index': index
+            'ext': os.path.splitext(url)[1]
         })
 
         save_dir = context.format(self.save_dir)
@@ -213,12 +218,12 @@ def _get_format_fn(format_str: str):
 
 # 动作：设置页面数据
 # :custom 函数或格式化字符串
-class SetPageData:
+class SetData:
     def __init__(self, data_name, custom):
         self.data_name = data_name
         self.fn = _get_format_fn(custom) if type(custom) is str else custom
 
-    def act(self, result: Result, page_data: dict, index):
+    def act(self, result: Result, page_data: dict):
         page_data[self.data_name] = self.fn(result)
 
 
@@ -229,7 +234,7 @@ class Enqueue:
         self.level = level
         self.fn = _get_format_fn(custom) if type(custom) is str else custom
 
-    def act(self, result: Result, page_data: dict, index):
+    def act(self, result: Result, page_data: dict):
         url = self.fn(result) if callable(self.fn) else result.val
         q.put(PageTask(self.level, url, page_data))
 
