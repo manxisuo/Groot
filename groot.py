@@ -221,6 +221,7 @@ class PageTask:
         self.level = level
         self.url = url
         self.last_page_data = last_page_data or {}  # 上一个页面的页面数据
+        self.need_sleep = True
 
     def tid(self):
         return self.url
@@ -264,13 +265,14 @@ class DownloadTask:
         self.url = url
         self.savedir = savedir
         self.filename = filename
+        self.need_sleep = True
 
     def tid(self):
         return self.url
 
     def run(self):
         _info('Download {0}'.format(urllib.parse.unquote(self.url)))
-        _download(self.url, self.savedir, self.filename)
+        self.need_sleep = _download(self.url, self.savedir, self.filename)
 
 
 def config(cfg: dict):
@@ -308,7 +310,9 @@ def start():
     _queue.join()
 
 
-def _download(url, savedir, filename):
+# 下载文件
+# 返回值：是否真正下载
+def _download(url, savedir, filename) -> bool:
     if not os.path.exists(savedir):
         try:
             os.makedirs(savedir)
@@ -322,6 +326,9 @@ def _download(url, savedir, filename):
         with open(file_path, 'wb') as fd:
             for chunk in resp.iter_content(chunk_size=128):  # TODO
                 fd.write(chunk)
+        return True
+    else:
+        return False
 
 
 def _context_fn(str_or_fn):
@@ -344,7 +351,8 @@ def _work_func():
         _done_status[task_flag] += 1
         _queue.task_done()
 
-        time.sleep(_config['interval'])
+        if task.need_sleep:
+            time.sleep(_config['interval'])
 
 
 def _monitor_func():
