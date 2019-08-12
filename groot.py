@@ -76,7 +76,7 @@ class Element:
     def __init__(self, selector):
         self.selector = Selector(selector) if type(selector) is str else selector
 
-    def extract(self, resp_str):
+    def extract(self, resp_str, page_inner_data):
         elements = self.selector.select(resp_str)
         for el in elements:
             context = {**el.attrs, '_text_': el.text}  # 特殊属性：'_text_'
@@ -91,7 +91,7 @@ class Re:
     def __init__(self, re_str):
         self.regexp = re.compile(re_str)
 
-    def extract(self, resp_str):
+    def extract(self, resp_str, page_inner_data):
         for m in self.regexp.finditer(resp_str):
             val = m.group()
             context = {'#'+str(k+1): v for k, v in enumerate(m.groups())}
@@ -105,11 +105,11 @@ class Chain:
     def __init__(self, *extractors):
         self.extractors = extractors
 
-    def extract(self, resp_str):
+    def extract(self, resp_str, page_inner_data):
 
         def fn(_contexts, _extract):
             for _context in _contexts:
-                yield from _extract(_context)
+                yield from _extract(_context, page_inner_data)
 
         contexts = [resp_str]
         for extractor in self.extractors:
@@ -126,8 +126,8 @@ class Func:
     def act(self, context: dict, page_data: dict):
         self.fn(context)
 
-    def extract(self, resp_str):
-        yield from self.fn(resp_str)
+    def extract(self, resp_str, page_inner_data):
+        yield from self.fn(resp_str, page_inner_data)
 
 
 # 什么都不做的抽取器或动作
@@ -138,7 +138,7 @@ class Nothing:
     def act(self, context: dict, page_data: dict):
         pass
 
-    def extract(self, resp_str):
+    def extract(self, resp_str, page_inner_data):
         yield {}
 
 
@@ -185,7 +185,7 @@ class SetData:
     def __init__(self, scope, data_name, data_value_sof, keep=False):
         self.scope = scope
         self.data_name = data_name
-        self.data_value_fn = _context_fn(data_value_sof)
+        self.data_value_fn = _context_fn(data_value_sof)  # TODO 如果直接想从上下文中按名称取值怎么办
         self.keep = keep
 
     def act(self, context: dict, page_data: dict):
@@ -234,7 +234,7 @@ class PageTask:
 
         for extractor, actions in rules:
             # 抽取结果
-            contexts = extractor.extract(resp_str)
+            contexts = extractor.extract(resp_str, page_data['#inner'])
             contexts = [*contexts]  # 为了计算结果数，所以转为list。TODO
             r_len = len(contexts)
 
