@@ -28,20 +28,20 @@ _config = {
 _rule_dict = {}  # 用户注册的各级页面处理逻辑
 _queue = Queue()  # URL队列 TODO maxsize
 _done_tasks = set()  # 已处理任务的标识列表
-_queue_status = {}
+_todo_status = {}
 _done_status = {}
 
 
 def _put_task(task):
     task_flag = type(task).__name__
-    _queue_status.setdefault(task_flag, 0)
-    _queue_status[task_flag] += 1
+    _todo_status.setdefault(task_flag, 0)
+    _todo_status[task_flag] += 1
     _queue.put(task)
 
 
 def _get_task():
     task = _queue.get()
-    _queue_status[type(task).__name__] -= 1
+    _todo_status[type(task).__name__] -= 1
     return task
 
 
@@ -358,7 +358,7 @@ def _work_func():
 def _monitor_func():
     while True:
         time.sleep(_config['status_log_interval'])
-        _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(sum(_done_status.values()), _done_status, sum(_queue_status.values()), _queue_status))
+        _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(sum(_done_status.values()), _done_status, sum(_todo_status.values()), _todo_status))
 
 
 if __name__ == "__main__":
