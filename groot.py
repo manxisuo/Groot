@@ -9,7 +9,6 @@ import sys
 import os
 import os.path
 import threading
-from collections import Mapping
 from enum import Enum
 
 _session = requests.Session()
@@ -56,8 +55,9 @@ def _identify(sth, *args, **kwargs):
 
 
 # 打印INFO日志
-def _info(msg):
+def _info(msg, *args, **kwargs):
     t = time.strftime('%Y-%m-%d %H:%M:%S')
+    msg = msg.format(*args, **kwargs)
     print('[INFO][{0}] {1}'.format(t, msg))
 
 
@@ -141,11 +141,11 @@ class Nothing:
     def __init__(self):
         pass
 
-    def act(self, context: dict, page_data: dict):
-        pass
-
     def extract(self, resp_str, page_inner_data):
         yield {}
+
+    def act(self, context: dict, page_data: dict):
+        pass
 
 
 # 动作：URL入队列
@@ -233,7 +233,7 @@ class PageTask:
         return self.url
 
     def run(self):
-        _info('Get {0}'.format(urllib.parse.unquote(self.url)))
+        _info('Get {0}', urllib.parse.unquote(self.url))
 
         self.need_sleep, resp_str = _get_page_content(self.level, self.url)
 
@@ -279,7 +279,7 @@ class DownloadTask:
         return self.url
 
     def run(self):
-        _info('Download {0}'.format(urllib.parse.unquote(self.url)))
+        _info('Download {0}', urllib.parse.unquote(self.url))
         self.need_sleep = _download(self.url, self.savedir, self.filename)
 
 
@@ -313,7 +313,7 @@ def page_rule(level, extractors, actions):
 
 
 def login(login_url, params):
-    _info('Login {0}'.format(login_url))
+    _info('Login {0}', login_url)
     r = _session.post(login_url, data=params)
 
 
@@ -327,7 +327,7 @@ def start():
     start_time = time.time()
     _queue.join()
     _print_monitor_log()
-    _info('Completed. Cost(Seconds): {0}'.format(time.time() - start_time))
+    _info('Completed. Cost(Seconds): {0}', time.time() - start_time)
 
 
 # 请求URL对应的链接内容（HTML）
@@ -379,9 +379,18 @@ def _download(url, savedir, filename) -> bool:
         return False
 
 
+_RE_EXPR = re.compile('^{{(.+)}}$')
+
+
 def _context_fn(str_or_fn):
     if type(str_or_fn) is str:
-        return lambda ctx: str_or_fn.format_map(ctx)
+        def fn(ctx):
+            m = _RE_EXPR.match(str_or_fn)
+            if m:
+                return eval(m.group(1), globals(), ctx)
+            else:
+                return str_or_fn.format_map(ctx)
+        return fn
     else:
         return str_or_fn
 
@@ -404,8 +413,10 @@ def _work_func():
 
 
 def _print_monitor_log():
-    _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(sum(_done_status.values()), _done_status,
-                                                         sum(_todo_status.values()), _todo_status))
+    _info('Status [DONE: {0} {1}, TODO: {2} {3}]',
+          sum(_done_status.values()), _done_status,
+          sum(_todo_status.values()), _todo_status)
+
 
 def _monitor_func():
     while True:
