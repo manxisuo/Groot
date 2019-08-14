@@ -23,7 +23,13 @@ _config = {
     'thread_num': 2,
     'interval': 1,  # 同一线程两次HTTP请求的间隔秒数
     'status_log_interval': 3,
+    'html_cache_dir': './_html_'
 }
+
+# 页面或下载的文件是否缓存的设置
+# 默认：True，即使用缓存。
+_html_use_cache = {}
+_download_use_cache = True
 
 _rule_dict = {}  # 用户注册的各级页面处理逻辑
 _queue = Queue()  # URL队列 TODO maxsize
@@ -229,8 +235,10 @@ class PageTask:
     def run(self):
         _info('Get {0}'.format(urllib.parse.unquote(self.url)))
 
+        self.need_sleep, resp_str = _get_page_content(self.level, self.url)
+
         page_data = {'#inner': {'_url_': self.url}, '#outer': {}}  # 当前页面的页面数据
-        resp_str = str(_session.get(self.url).content, 'utf-8')
+
         rules = _rule_dict[self.level]
 
         for extractor, actions in rules:
@@ -279,6 +287,15 @@ def config(cfg: dict):
     _config.update(cfg)
 
 
+def html_not_use_cache(level):
+    _html_use_cache[level] = False
+
+
+def download_not_use_cache():
+    global _download_use_cache
+    _download_use_cache = False
+
+
 def initial_urls(urls):
     for url in urls:
         _put_task(PageTask(1, url))
@@ -307,11 +324,41 @@ def start():
         t.daemon = True  # TODO
         t.start()
     threading.Thread(target=_monitor_func, daemon=True).start()  # 启动监控线程
+    start_time = time.time()
     _queue.join()
+    _print_monitor_log()
+    _info('Completed. Cost(Seconds): {0}'.format(time.time() - start_time))
+
+
+# 请求URL对应的链接内容（HTML）
+# 返回值：(real_get: bool, resp_str: str)，其中：real_get表示是否真正请求远程服务器，resp_str表示返回的网页的文本。
+def _get_page_content(level, url):
+    use_cache = _html_use_cache.get(level, True)
+    if not use_cache:  # 不使用缓存
+        resp_str = str(_session.get(url).content, 'utf-8')
+        return True, resp_str
+    else:  # 使用缓存
+        cache_dir = _config['html_cache_dir']
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+
+        urllib.parse.quote('@' + url)
+        html_name = urllib.parse.quote('@' + url).replace('/', '#') + '.html'
+        html_path = os.path.join(cache_dir, html_name)
+
+        if not os.path.exists(html_path):  # 缓存不存在
+            resp_str = str(_session.get(url).content, 'utf-8')
+            with open(html_path, 'w') as file:
+                file.write(resp_str)
+            return True, resp_str
+        else:
+            with open(html_path, 'r') as file:
+                resp_str = file.read()
+                return False, resp_str
 
 
 # 下载文件
-# 返回值：是否真正下载
+# 返回值：real_download: bool 是否真正下载
 def _download(url, savedir, filename) -> bool:
     if not os.path.exists(savedir):
         try:
@@ -320,14 +367,15 @@ def _download(url, savedir, filename) -> bool:
             pass
 
     file_path = os.path.join(savedir, filename)
-    if not os.path.exists(file_path):
+
+    if not _download_use_cache or not os.path.exists(file_path):  # 不使用缓存或者使用缓存但是文件不存在
         # urllib.request.urlretrieve(url, file_path)
         resp = _session.get(url, stream=True)
         with open(file_path, 'wb') as fd:
             for chunk in resp.iter_content(chunk_size=128):  # TODO
                 fd.write(chunk)
         return True
-    else:
+    else:  # 使用缓存且文件存在
         return False
 
 
@@ -355,10 +403,14 @@ def _work_func():
             time.sleep(_config['interval'])
 
 
+def _print_monitor_log():
+    _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(sum(_done_status.values()), _done_status,
+                                                         sum(_todo_status.values()), _todo_status))
+
 def _monitor_func():
     while True:
         time.sleep(_config['status_log_interval'])
-        _info('Status [DONE: {0} {1}, TODO: {2} {3}]'.format(sum(_done_status.values()), _done_status, sum(_todo_status.values()), _todo_status))
+        _print_monitor_log()
 
 
 if __name__ == "__main__":
