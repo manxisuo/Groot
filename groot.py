@@ -244,6 +244,8 @@ class PageTask:
         for extractor, actions in rules:
             # 抽取结果
             contexts = extractor.extract(resp_str, page_data['#inner'])
+            if not contexts:
+                continue
             contexts = [*contexts]  # 为了计算结果数，所以转为list。TODO
             r_len = len(contexts)
 
@@ -279,7 +281,7 @@ class DownloadTask:
         return self.url
 
     def run(self):
-        _info('Download {0}', urllib.parse.unquote(self.url))
+        _info('Download {0} -> {1}', urllib.parse.unquote(self.url), os.path.join(self.savedir, self.filename))
         self.need_sleep = _download(self.url, self.savedir, self.filename)
 
 
