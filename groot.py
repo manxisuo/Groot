@@ -10,6 +10,8 @@ import os
 import os.path
 import threading
 from enum import Enum
+from typing import Mapping, Union, Callable, Any, Iterable
+
 
 _session = requests.Session()
 _session.headers['User-Agent'] = (
@@ -35,6 +37,9 @@ _queue = Queue()  # URL队列 TODO maxsize
 _done_tasks = set()  # 已处理任务的标识列表
 _todo_status = {}
 _done_status = {}
+
+Context = Mapping[str, Any]
+ContextConsumer = Callable[[Context], Any]
 
 
 def _put_task(task):
@@ -79,10 +84,10 @@ class Selector:
 
 # 元素属性提取器
 class Element:
-    def __init__(self, selector):
+    def __init__(self, selector: Union[str, Selector]):
         self.selector = Selector(selector) if type(selector) is str else selector
 
-    def extract(self, resp_str, page_inner_data):
+    def extract(self, resp_str, page_inner_data: Context) -> Iterable[Context]:
         elements = self.selector.select(resp_str)
         for el in elements:
             context = {**el.attrs, '_text_': el.text}  # 特殊属性：'_text_'
@@ -94,10 +99,10 @@ Tag = Element
 
 # 正则表达式抽取器
 class Re:
-    def __init__(self, re_str):
+    def __init__(self, re_str: str):
         self.regexp = re.compile(re_str)
 
-    def extract(self, resp_str, page_inner_data):
+    def extract(self, resp_str, page_inner_data: Context) -> Iterable[Context]:
         for m in self.regexp.finditer(resp_str):
             val = m.group()
             context = {'#'+str(k+1): v for k, v in enumerate(m.groups())}
@@ -111,7 +116,7 @@ class Chain:
     def __init__(self, *extractors):
         self.extractors = extractors
 
-    def extract(self, resp_str, page_inner_data):
+    def extract(self, resp_str, page_inner_data: Context) -> Iterable[Context]:
 
         def fn(_contexts, _extract):
             for _context in _contexts:
@@ -129,10 +134,10 @@ class Func:
     def __init__(self, fn):
         self.fn = fn
 
-    def act(self, context: dict, page_data: dict):
+    def act(self, context: Context, page_data: Context):
         self.fn(context)
 
-    def extract(self, resp_str, page_inner_data):
+    def extract(self, resp_str, page_inner_data) -> Iterable[Context]:
         yield from self.fn(resp_str, page_inner_data)
 
 
@@ -144,18 +149,17 @@ class Nothing:
     def extract(self, resp_str, page_inner_data):
         yield {}
 
-    def act(self, context: dict, page_data: dict):
+    def act(self, context: Context, page_data: Context):
         pass
 
 
 # 动作：URL入队列
-# :custom 函数或格式化字符串
 class Enqueue:
-    def __init__(self, level, url_sof):
+    def __init__(self, level, url: Union[str, ContextConsumer]):
         self.level = level
-        self.url_fn = _context_fn(url_sof)
+        self.url_fn = _context_fn(url)
 
-    def act(self, context: dict, page_data: dict):
+    def act(self, context: Context, page_data: Context):
         url = self.url_fn(context)
         last_page_data = {**page_data['#outer'], **context['#outer']}
         _put_task(PageTask(self.level, url, last_page_data))
@@ -163,12 +167,12 @@ class Enqueue:
 
 # 动作：下载
 class Download:
-    def __init__(self, url_sof, savedir_sof, filename_sof):
-        self.url_fn = _context_fn(url_sof)
-        self.savedir_fn = _context_fn(savedir_sof)
-        self.filename_fn = _context_fn(filename_sof)
+    def __init__(self, url: Union[str, ContextConsumer], savedir: Union[str, ContextConsumer], filename: Union[str, ContextConsumer]):
+        self.url_fn = _context_fn(url)
+        self.savedir_fn = _context_fn(savedir)
+        self.filename_fn = _context_fn(filename)
 
-    def act(self, context: dict, page_data: dict):
+    def act(self, context: Context, page_data: Context):
         url = self.url_fn(context)
 
         action_ctx = {**context, **{
@@ -186,25 +190,24 @@ class Scope(Enum):
 
 
 # 动作：在某个作用范围内设置一个数据项
-# :custom 函数或格式化字符串
 class SetData:
-    def __init__(self, scope, data_name, data_value_sof, keep=False):
+    def __init__(self, scope, data_name, data_value: Union[str, ContextConsumer], keep=False):
         self.scope = scope
         self.data_name = data_name
-        self.data_value_fn = _context_fn(data_value_sof)  # TODO 如果直接想从上下文中按名称取值怎么办
+        self.data_value_fn = _context_fn(data_value)  # TODO 如果直接想从上下文中按名称取值怎么办
         self.keep = keep
 
-    def act(self, context: dict, page_data: dict):
-        data_value = self.data_value_fn(context)
+    def act(self, ctx: Context, page_data: Context):
+        data_value = self.data_value_fn(ctx)
         if self.scope == Scope.PAGE:
             if self.keep:
                 page_data['#outer'][self.data_name] = data_value
             else:
                 page_data['#inner'][self.data_name] = data_value
         elif self.scope == Scope.ACTIONS:
-            context[self.data_name] = data_value
+            ctx[self.data_name] = data_value
             if self.keep:
-                context['#outer'][self.data_name] = data_value
+                ctx['#outer'][self.data_name] = data_value
 
 
 # 将一个在当前上下文能取到的变量，保存在指定的作用范围内，并保持到下一级别的页面
@@ -213,17 +216,17 @@ class KeepData:
         self.scope = scope
         self.data_name = data_name
 
-    def act(self, context: dict, page_data: dict):
-        data_value = context[self.data_name]
+    def act(self, ctx: Context, page_data: Context):
+        data_value = ctx[self.data_name]
         if self.scope == Scope.PAGE:
             page_data['#outer'][self.data_name] = data_value
         elif self.scope == Scope.ACTIONS:
-            context['#outer'][self.data_name] = data_value
+            ctx['#outer'][self.data_name] = data_value
 
 
 # 页面处理任务
 class PageTask:
-    def __init__(self, level, url, last_page_data=None):
+    def __init__(self, level: int, url: str, last_page_data: Context = None):
         self.level = level
         self.url = url
         self.last_page_data = last_page_data or {}  # 上一个页面的页面数据
@@ -271,7 +274,7 @@ class PageTask:
 
 # 文件下载任务
 class DownloadTask:
-    def __init__(self, url, savedir, filename):
+    def __init__(self, url: str, savedir: str, filename: str):
         self.url = url
         self.savedir = savedir
         self.filename = filename
@@ -285,7 +288,7 @@ class DownloadTask:
         self.need_sleep = _download(self.url, self.savedir, self.filename)
 
 
-def config(cfg: dict):
+def config(cfg: Context):
     _config.update(cfg)
 
 
@@ -361,7 +364,7 @@ def _get_page_content(level, url):
 
 # 下载文件
 # 返回值：real_download: bool 是否真正下载
-def _download(url, savedir, filename) -> bool:
+def _download(url: str, savedir: str, filename: str) -> bool:
     if not os.path.exists(savedir):
         try:
             os.makedirs(savedir)
@@ -384,9 +387,9 @@ def _download(url, savedir, filename) -> bool:
 _RE_EXPR = re.compile('^{{(.+)}}$')
 
 
-def _context_fn(str_or_fn):
+def _context_fn(str_or_fn: Union[str, ContextConsumer]):
     if type(str_or_fn) is str:
-        def fn(ctx):
+        def fn(ctx: Context):
             m = _RE_EXPR.match(str_or_fn)
             if m:
                 return eval(m.group(1), globals(), ctx)
