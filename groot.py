@@ -104,7 +104,6 @@ class Re:
 
     def extract(self, resp_str, page_inner_data: Context) -> Iterable[Context]:
         for m in self.regexp.finditer(resp_str):
-            val = m.group()
             context = {'#'+str(k+1): v for k, v in enumerate(m.groups())}
             context['#0'] = m.group()
             yield context
